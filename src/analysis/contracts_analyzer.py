@@ -1,4 +1,4 @@
-# src/analysis/contracts_analyzer.py
+# src/contracts_analyzer.py
 
 """
 Contracts Analyzer Module.
@@ -20,9 +20,7 @@ class ContractCannotBeAnalyzed(Exception):
     """
 
     def __init__(self):
-        self.message = (
-            "Can't analyze contract"
-        )
+        self.message = "Can't analyze contract"
         super().__init__(self.message)
 
 
@@ -44,7 +42,7 @@ class ContractsAnalyzer:
             raise ValueError("Etherscan API key not found in environment variables.")
 
     def analyze_contract(self, abi: Dict, contract_address: str) -> (
-            Dict)[str, Union[str, bool, float]]:
+            Dict[str, Union[str, bool, float]]):
         """
         Analyzes a contract for taxes, gas usage, and operational limits.
 
@@ -52,12 +50,24 @@ class ContractsAnalyzer:
         :param contract_address: The Ethereum address of the contract.
         :return: A dictionary containing analysis results.
         """
-        contract = self.web3.eth.contract(address=contract_address, abi=abi)
         try:
+            contract = self.web3.eth.contract(address=contract_address, abi=abi)
+
             buy_tax = self.infer_tax(contract_address, action="buy")
+            print(f"Buy tax for {contract_address}: {buy_tax}")
+
             sell_tax = self.infer_tax(contract_address, action="sell")
+            print(f"Sell tax for {contract_address}: {sell_tax}")
+
             transfer_tax = self.infer_tax(contract_address, action="transfer")
+            print(f"Transfer tax for {contract_address}: {transfer_tax}")
+
             gas_metrics = self.calculate_gas_metrics(contract_address)
+            print(f"Gas metrics for {contract_address}: {gas_metrics}")
+
+            limits_detected = self.detect_limits(contract)
+            print(f"Limits detected for {contract_address}: {limits_detected}")
+
             return {
                 "buy_tax": buy_tax,
                 "sell_tax": sell_tax,
@@ -65,9 +75,10 @@ class ContractsAnalyzer:
                 "average_gas": gas_metrics["average_gas"],
                 "buy_gas": gas_metrics["buy_gas"],
                 "sell_gas": gas_metrics["sell_gas"],
-                "limits_detected": self.detect_limits(contract),
+                "limits_detected": limits_detected,
             }
         except Exception as error:
+            print(f"Error analyzing contract {contract_address}: {error}")
             raise ValueError("Error analyzing contract") from error
 
     def infer_tax(self, contract_address: str, action: str) -> Union[str, float]:
@@ -81,10 +92,10 @@ class ContractsAnalyzer:
         try:
             url = (
                 f"https://api.etherscan.io/api?module=account&"
-                f"action=tokentx&contractaddress={contract_address}" 
-                f"&page=1&offset=100&sort=desc&apikey={self.etherscan_api_key}"
+                f"action=tokentx&contractaddress={contract_address}"
+                f"&page=1&offset=1000&sort=desc&apikey={self.etherscan_api_key}"
             )
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=60)
             if response.status_code == 200:
                 result = response.json()
                 if result["status"] == "1":
@@ -97,32 +108,34 @@ class ContractsAnalyzer:
                         gas_price = int(tx["gasPrice"])
                         gas_used = int(tx["gasUsed"])
 
-                        # Skip irrelevant or unrealistic transactions
-                        if (int(tx["value"]) <= 0 or int(tx["value"]) <
-                                self.web3.to_wei(0.0001, 'ether')):
+                        if int(tx["value"]) <= 0:
                             continue
 
-                        # Tax estimation logic based on transaction type
+                        tax_value = (gas_price * gas_used) / int(tx["value"])
+
+                        if tax_value > 1:
+                            continue
+
                         if action == "buy" and tx["to"] != contract_address:
-                            total_tax += (gas_price * gas_used) / int(tx["value"])
+                            total_tax += tax_value
                             tax_count += 1
                         elif action == "sell" and tx["from"] != contract_address:
-                            total_tax += (gas_price * gas_used) / int(tx["value"])
+                            total_tax += tax_value
                             tax_count += 1
-                        elif (action == "transfer" and tx["from"] != contract_address and
-                              tx["to"] != contract_address):
-                            total_tax += (gas_price * gas_used) / int(tx["value"])
+                        elif (action == "transfer" and tx["from"] != contract_address
+                              and tx["to"] != contract_address):
+                            total_tax += tax_value
                             tax_count += 1
 
                     if tax_count > 0:
-                        # Cap maximum tax to prevent unrealistic results
-                        average_tax = min(round(total_tax / tax_count * 100, 2), 100)
-                        return average_tax
-                    return "0%"  # Explicitly return 0% if no tax-like transactions are found
-                return f"Etherscan API error: {result.get('message', 'Unknown error')}"
+                        return round(total_tax / tax_count * 100, 2)
+                    return 0.0
+                return "No relevant transactions found"
+            print(f"HTTP error for tax inference: {response.status_code}")
             return f"HTTP error: {response.status_code}"
         except Exception as error:
-            raise ContractCannotBeAnalyzed() from error
+            print(f"Error inferring tax for {contract_address}: {error}")
+            raise ValueError("Error inferring taxes") from error
 
     def calculate_gas_metrics(self, contract_address: str) -> Dict[str, float]:
         """
@@ -141,9 +154,9 @@ class ContractsAnalyzer:
                 url = (
                     f"https://api.etherscan.io/api?module=account&"
                     f"action=tokentx&contractaddress={contract_address}"
-                    f"&page={page}&offset=100&sort=desc&apikey={self.etherscan_api_key}"
+                    f"&page={page}&offset=1000&sort=desc&apikey={self.etherscan_api_key}"
                 )
-                response = requests.get(url, timeout=10)
+                response = requests.get(url, timeout=60)
                 if response.status_code != 200:
                     break
 
@@ -156,23 +169,31 @@ class ContractsAnalyzer:
                 for tx in transactions:
                     if int(tx["value"]) <= 0:
                         continue
+                    print()
 
-                    total_gas += int(tx["gasUsed"])
+                    gas_used = int(tx["gasUsed"])
+                    total_gas += gas_used
                     gas_count += 1
 
-                    if tx["to"].lower() == contract_address.lower():
-                        total_buy_gas += int(tx["gasUsed"])
-                    elif tx["from"].lower() == contract_address.lower():
-                        total_sell_gas += int(tx["gasUsed"])
+                    if (tx.get("contractAddress", "").lower() ==
+                            contract_address.lower() and tx["from"]):
+                        total_buy_gas += gas_used
+
+                    if (tx.get("contractAddress", "").lower() ==
+                            contract_address.lower() and tx["to"]):
+                        total_sell_gas += gas_used
 
             average_gas = total_gas / gas_count if gas_count > 0 else 0
+            print(f"Calculated Gas Metrics for {contract_address}: {{'average_gas': {average_gas},"
+                  f" 'buy_gas': {total_buy_gas}, 'sell_gas': {total_sell_gas}}}")
             return {
                 "average_gas": average_gas,
                 "buy_gas": total_buy_gas,
                 "sell_gas": total_sell_gas,
             }
         except Exception as error:
-            raise ContractCannotBeAnalyzed() from error
+            print(f"Error calculating gas metrics for {contract_address}: {error}")
+            raise ValueError("Error calculating gas metrics") from error
 
     def detect_limits(self, contract: Web3().eth.contract) -> bool:
         """
@@ -184,7 +205,8 @@ class ContractsAnalyzer:
         try:
             if hasattr(contract.functions, 'maxTxAmount'):
                 max_tx_amount = contract.functions.maxTxAmount().call()
-                return max_tx_amount < self.web3.to_wei(1, 'ether')  # Example threshold
+                return max_tx_amount < self.web3.to_wei(1, 'ether')
             return False
         except Exception as error:
-            raise ContractCannotBeAnalyzed() from error
+            print(f"Error detecting limits for contract {contract.address}: {error}")
+            raise ValueError("Error detecting limits") from error

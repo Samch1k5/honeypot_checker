@@ -55,7 +55,7 @@ class EtherscanAPI:
             f"{self.BASE_URL}?module=contract&action=getabi&address="
             f"{contract_address}&apikey={self.etherscan_api_key}"
         )
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=60)
         if response.status_code == 200:
             result = response.json()
             if result["status"] == "1":
