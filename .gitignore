@@ -1,4 +1,3 @@
 .idea/
 .venv/
-src/.env.example
 *.env
