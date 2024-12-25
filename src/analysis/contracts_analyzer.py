@@ -12,6 +12,7 @@ from typing import Dict, Union
 import requests
 from web3 import Web3
 from dotenv import load_dotenv
+from config import logger
 
 
 class ContractCannotBeAnalyzed(Exception):
@@ -39,7 +40,7 @@ class ContractsAnalyzer:
         load_dotenv()
         self.etherscan_api_key = os.getenv("ETHERSCAN_API_KEY")
         if not self.etherscan_api_key:
-            raise ValueError("Etherscan API key not found in environment variables.")
+            logger.fatal("Etherscan API key not found in environment variables.")
 
     def analyze_contract(self, abi: Dict, contract_address: str) -> (
             Dict[str, Union[str, bool, float]]):
@@ -51,22 +52,24 @@ class ContractsAnalyzer:
         :return: A dictionary containing analysis results.
         """
         try:
-            contract = self.web3.eth.contract(address=contract_address, abi=abi)
+            contract = self.web3.eth.contract(
+                address=self.web3.to_checksum_address(contract_address.lower()),
+                abi=abi)
 
             buy_tax = self.infer_tax(contract_address, action="buy")
-            print(f"Buy tax for {contract_address}: {buy_tax}")
+            logger.debug("Buy tax for %s: %s", contract_address, buy_tax)
 
             sell_tax = self.infer_tax(contract_address, action="sell")
-            print(f"Sell tax for {contract_address}: {sell_tax}")
+            logger.debug("Sell tax for %s: %s", contract_address, sell_tax)
 
             transfer_tax = self.infer_tax(contract_address, action="transfer")
-            print(f"Transfer tax for {contract_address}: {transfer_tax}")
+            logger.debug("Transfer tax for %s: %s", contract_address, transfer_tax)
 
             gas_metrics = self.calculate_gas_metrics(contract_address)
-            print(f"Gas metrics for {contract_address}: {gas_metrics}")
+            logger.debug("Gas metrics for %s: %s", contract_address, gas_metrics)
 
             limits_detected = self.detect_limits(contract)
-            print(f"Limits detected for {contract_address}: {limits_detected}")
+            logger.debug("Limits detected for %s: %s", contract_address, limits_detected)
 
             return {
                 "buy_tax": buy_tax,
@@ -77,9 +80,18 @@ class ContractsAnalyzer:
                 "sell_gas": gas_metrics["sell_gas"],
                 "limits_detected": limits_detected,
             }
-        except Exception as error:
-            print(f"Error analyzing contract {contract_address}: {error}")
-            raise ValueError("Error analyzing contract") from error
+        except requests.exceptions.RequestException as req_err:
+            logger.error("HTTP request failed for %s: %s", contract_address, req_err)
+            return {
+                "error": True,
+                "message": "HTTP request failed"
+            }
+        except KeyError as key_err:
+            logger.error("Key error while analyzing contract %s: %s", contract_address, key_err)
+            return {
+                "error": True,
+                "message": "Key error in contract analysis"
+            }
 
     def infer_tax(self, contract_address: str, action: str) -> Union[str, float]:
         """
@@ -130,12 +142,16 @@ class ContractsAnalyzer:
                     if tax_count > 0:
                         return round(total_tax / tax_count * 100, 2)
                     return 0.0
+                logger.error("No relevant transactions found for %s",
+                             contract_address)
                 return "No relevant transactions found"
-            print(f"HTTP error for tax inference: {response.status_code}")
+            logger.error("HTTP error for tax inference: %s",
+                         response.status_code)
             return f"HTTP error: {response.status_code}"
-        except Exception as error:
-            print(f"Error inferring tax for {contract_address}: {error}")
-            raise ValueError("Error inferring taxes") from error
+        except requests.exceptions.RequestException:
+            logger.error("HTTP request failed for tax inference for %s",
+                         contract_address)
+            return "HTTP request failed"
 
     def calculate_gas_metrics(self, contract_address: str) -> Dict[str, float]:
         """
@@ -158,18 +174,19 @@ class ContractsAnalyzer:
                 )
                 response = requests.get(url, timeout=60)
                 if response.status_code != 200:
+                    logger.error("HTTP error fetching gas metrics for %s: %s",
+                                 contract_address, response.status_code)
                     break
 
                 result = response.json()
                 if result["status"] != "1":
+                    logger.error("API error fetching gas metrics for %s: %s",
+                                 contract_address, result.get("message", "Unknown error"))
                     break
 
-                transactions = result["result"]
-
-                for tx in transactions:
+                for tx in result["result"]:
                     if int(tx["value"]) <= 0:
                         continue
-                    print()
 
                     gas_used = int(tx["gasUsed"])
                     total_gas += gas_used
@@ -184,16 +201,21 @@ class ContractsAnalyzer:
                         total_sell_gas += gas_used
 
             average_gas = total_gas / gas_count if gas_count > 0 else 0
-            print(f"Calculated Gas Metrics for {contract_address}: {{'average_gas': {average_gas},"
-                  f" 'buy_gas': {total_buy_gas}, 'sell_gas': {total_sell_gas}}}")
+            logger.debug("Calculated Gas Metrics for %s:"
+                         " {'average_gas': %s, 'buy_gas': %s, 'sell_gas': %s}",
+                         contract_address, average_gas, total_buy_gas, total_sell_gas)
             return {
                 "average_gas": average_gas,
                 "buy_gas": total_buy_gas,
                 "sell_gas": total_sell_gas,
             }
-        except Exception as error:
-            print(f"Error calculating gas metrics for {contract_address}: {error}")
-            raise ValueError("Error calculating gas metrics") from error
+        except requests.exceptions.RequestException as req_err:
+            logger.error("HTTP request failed for gas metrics for %s: %s",
+                         contract_address, req_err)
+            return {
+                "error": True,
+                "message": "HTTP request failed"
+            }
 
     def detect_limits(self, contract: Web3().eth.contract) -> bool:
         """
@@ -207,6 +229,6 @@ class ContractsAnalyzer:
                 max_tx_amount = contract.functions.maxTxAmount().call()
                 return max_tx_amount < self.web3.to_wei(1, 'ether')
             return False
-        except Exception as error:
-            print(f"Error detecting limits for contract {contract.address}: {error}")
-            raise ValueError("Error detecting limits") from error
+        except AttributeError as attr_err:
+            logger.error("Attribute error detecting limits for contract: %s", attr_err)
+            return False

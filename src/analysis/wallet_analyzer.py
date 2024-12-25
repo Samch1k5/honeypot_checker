@@ -11,6 +11,7 @@ from collections import defaultdict
 from typing import Dict, Union
 import requests
 from dotenv import load_dotenv
+from config import logger
 
 
 class WalletAnalyzer:
@@ -22,7 +23,7 @@ class WalletAnalyzer:
         load_dotenv()
         self.etherscan_api_key = os.getenv("ETHERSCAN_API_KEY")
         if not self.etherscan_api_key:
-            raise ValueError("Etherscan API key not found in environment variables")
+            logger.fatal("Etherscan API key not found in environment variables")
 
     def analyze_holders(self, token_address: str) -> Dict[str, Union[int, bool]]:
         """
@@ -33,37 +34,37 @@ class WalletAnalyzer:
         """
         try:
             holders_data = self.get_token_holders(token_address)
-            holders_count = len(holders_data)
             total_supply = sum(data["balance"] for data in holders_data.values())
 
             suspicious_wallets = self.detect_suspicious_wallets(holders_data, total_supply)
-            suspicious_ratio = len(suspicious_wallets) / holders_count if holders_count > 0 else 0
+            suspicious_ratio = (len(suspicious_wallets) /
+                                len(holders_data)) if len(holders_data) > 0 else 0
 
             suspicious_threshold = 0.15  # >15% suspicious wallets is concerning
             low_holder_threshold = 100  # Tokens with <100 holders are suspicious
-            high_concentration_threshold = 0.7  # Concentration >70% among suspicious wallets
+            high_concentration_threshold = 0.9  # Concentration >90% among suspicious wallets
 
             concentration_score = sum(
                 data["balance"] for address, data in holders_data.items()
                 if address in suspicious_wallets
             ) / total_supply if total_supply > 0 else 0
 
-            print(f"Token Address: {token_address}")
-            print(f"Holders Count: {holders_count}")
-            print(f"Suspicious Ratio: {suspicious_ratio}")
-            print(f"Concentration Score: {concentration_score}")
-            print(f"Suspicious Wallets: {len(suspicious_wallets)}")
+            logger.debug("Token Address: %s", token_address)
+            logger.debug("Holders Count: %s", len(holders_data))
+            logger.debug("Suspicious Ratio: %s", suspicious_ratio)
+            logger.debug("Concentration Score: %s", concentration_score)
+            logger.debug("Suspicious Wallets: %s", len(suspicious_wallets))
 
             # Honeypot-specific flags
             is_whitelisted = token_address in [
                 "0xdAC17F958D2ee523a2206206994597C13D831ec7",  # USDT
-                "0xA0b86991C6218b36c1d19D4a2e9Eb0cE3606eb48"   # USDC
+                "0xA0b86991C6218b36c1d19D4a2e9Eb0cE3606eb48"  # USDC
             ]
 
             if is_whitelisted:
                 is_honeypot = False
             elif (
-                    holders_count < low_holder_threshold or
+                    len(holders_data) < low_holder_threshold or
                     suspicious_ratio > suspicious_threshold or
                     concentration_score > high_concentration_threshold
             ):
@@ -71,16 +72,25 @@ class WalletAnalyzer:
             else:
                 is_honeypot = False
 
-            print(f"Is Honeypot: {is_honeypot}")
+            logger.debug("Is Honeypot: %s", is_honeypot)
 
             return {
-                "holders_analyzed": holders_count,
+                "holders_analyzed": len(holders_data),
                 "siphoned_wallets": len(suspicious_wallets),
                 "is_honeypot": is_honeypot
             }
-        except Exception as e:
-            print(f"Error analyzing wallets for {token_address}: {e}")
-            raise ValueError("Error analyzing wallets") from e
+        except requests.exceptions.RequestException as req_err:
+            logger.error("HTTP request failed for %s: %s", token_address, req_err)
+            return {
+                "error": True,
+                "message": "HTTP request failed"
+            }
+        except KeyError as key_err:
+            logger.error("Key error analyzing holders for %s: %s", token_address, key_err)
+            return {
+                "error": True,
+                "message": "Key error in holder analysis"
+            }
 
     def get_token_holders(self, token_address):
         """
@@ -90,36 +100,39 @@ class WalletAnalyzer:
         :return: A dictionary of holder addresses with their balances and transaction details.
         """
         page = 1
-        holder_data = defaultdict(lambda: {"balance": 0, "incoming": 0, "outgoing": 0})
+        holder_data = defaultdict(lambda:
+                                  {"balance": 0, "incoming": 0, "outgoing": 0})
 
         while True:
             url = (f"https://api.etherscan.io/api?module=account&"
                    f"action=tokentx&contractaddress={token_address}"
                    f"&page={page}&offset=10000&sort=asc&apikey={self.etherscan_api_key}")
-            response = requests.get(url, timeout=60)
+            try:
+                response = requests.get(url, timeout=60)
+                response.raise_for_status()
+            except requests.exceptions.RequestException as req_err:
+                logger.error("HTTP request failed while fetching"
+                             " holders for %s: %s", token_address, req_err)
+                break
 
-            if response.status_code == 200:
-                result = response.json()
-                if result["status"] != "1" or not result["result"]:
-                    break
+            result = response.json()
+            if result.get("status") != "1" or not result.get("result"):
+                break
 
-                transactions = result["result"]
+            transactions = result["result"]
 
-                for tx in transactions:
-                    to_address = tx["to"].lower()
-                    from_address = tx["from"].lower()
-                    value = int(tx["value"])
+            for tx in transactions:
+                to_address = tx["to"].lower()
+                from_address = tx["from"].lower()
+                value = int(tx["value"])
 
-                    holder_data[to_address]["balance"] += value
-                    holder_data[to_address]["incoming"] += 1
+                holder_data[to_address]["balance"] += value
+                holder_data[to_address]["incoming"] += 1
 
-                    holder_data[from_address]["balance"] -= value
-                    holder_data[from_address]["outgoing"] += 1
+                holder_data[from_address]["balance"] -= value
+                holder_data[from_address]["outgoing"] += 1
 
-                page += 1
-            else:
-                print(f"Error fetching holders for {token_address}: HTTP {response.status_code}")
-                raise ConnectionError(f"Failed to fetch holders: HTTP {response.status_code}")
+            page += 1
 
         # Remove addresses with zero balance
         return {k: v for k, v in holder_data.items() if v["balance"] > 0}

@@ -15,6 +15,7 @@ from helpers.etherscan_api import EtherscanAPI
 from analysis.contracts_analyzer import ContractsAnalyzer
 from analysis.wallet_analyzer import WalletAnalyzer
 from utils import validate_address
+from config import logger
 
 load_dotenv()
 
@@ -59,8 +60,9 @@ class HoneypotChecker:
                 **results[1],
                 **results[2]
             }
-        except Exception as e:
-            raise TokenCannotBeAnalyzed() from e
+        except ValueError as e:
+            logger.fatal("Token cannot be analyzed: %s", e)
+            return None
 
     def analyze_from_outer_scope(self, address: str) -> (
             tuple)[bool, dict[str, Union[str, bool]], Any]:
@@ -84,9 +86,13 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python honeypot_checker.py <ethereum_address>")
+        logger.info("Usage: python honeypot_checker.py <ethereum_address>")
         sys.exit(1)
 
-    checker = HoneypotChecker()
-    analysis = checker.analyze_address(sys.argv[1])
-    print(json.dumps(analysis, indent=4))
+    try:
+        checker = HoneypotChecker()
+        analysis = checker.analyze_address(sys.argv[1])
+        logger.info(json.dumps(analysis, indent=4))
+    except ValueError as e:
+        logger.fatal("Can't analyze this coin: %s", e)
+        sys.exit(1)
