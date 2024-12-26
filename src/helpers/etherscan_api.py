@@ -93,8 +93,13 @@ class EtherscanAPI:
         try:
             contract_abi = self.get_contract_abi(contract_address)
             try:
-                error = contract_abi["error"]
+                if contract_abi["error"]:
+                    logger.warning("Can't define abi for this"
+                                   " contract address: %s", contract_address)
+                    return False
                 return False
+            except KeyError:
+                return True
             except TypeError:
                 return True
         except ContractNotVerifiedError:

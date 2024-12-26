@@ -7,7 +7,6 @@ This module analyzes wallets for total holders and suspicious holders.
 """
 
 import os
-import sys
 from collections import defaultdict
 from typing import Dict, Union
 import requests

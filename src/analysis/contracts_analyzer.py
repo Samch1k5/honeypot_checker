@@ -52,20 +52,16 @@ class ContractsAnalyzer:
         :return: A dictionary containing analysis results.
         """
         try:
+            limits_detected = None
             if abi is None:
-                logger.warning("Can't define taxes, gas and limits because of none abi")
-                return {
-                    "buy_tax": 0,
-                    "sell_tax": 0,
-                    "transfer_tax": 0,
-                    "average_gas": 0,
-                    "buy_gas": 0,
-                    "sell_gas": 0,
-                    "limits_detected": False,
-                }
-            contract = self.web3.eth.contract(
-                address=self.web3.to_checksum_address(contract_address.lower()),
-                abi=abi)
+                logger.warning("Can't define limits because of none abi")
+                limits_detected = False
+                contract = self.web3.eth.contract(
+                    address=self.web3.to_checksum_address(contract_address.lower()))
+            else:
+                contract = self.web3.eth.contract(
+                    address=self.web3.to_checksum_address(contract_address.lower()),
+                    abi=abi)
 
             buy_tax = self.infer_tax(contract_address, action="buy")
             logger.debug("Buy tax for %s: %s", contract_address, buy_tax)
@@ -79,8 +75,9 @@ class ContractsAnalyzer:
             gas_metrics = self.calculate_gas_metrics(contract_address)
             logger.debug("Gas metrics for %s: %s", contract_address, gas_metrics)
 
-            limits_detected = self.detect_limits(contract)
-            logger.debug("Limits detected for %s: %s", contract_address, limits_detected)
+            if limits_detected is None:
+                limits_detected = self.detect_limits(contract)
+                logger.debug("Limits detected for %s: %s", contract_address, limits_detected)
 
             return {
                 "buy_tax": buy_tax,
