@@ -56,7 +56,7 @@ class HoneypotChecker:
 
             return {
                 "token_address": address,
-                "source_code_status": "open_source" if results[0] else "not_verified",
+                "source_code_status": "open_source" if results[0] else "closed",
                 **results[1],
                 **results[2]
             }
@@ -72,9 +72,10 @@ class HoneypotChecker:
         :param address: token address.
         :return: result variables.
         """
+        abi = None
         is_verified = self.etherscan.is_contract_verified(address)
-
-        abi = self.etherscan.get_contract_abi(address)
+        if is_verified:
+            abi = self.etherscan.get_contract_abi(address)
         contract_analysis = self.contracts_analyzer.analyze_contract(abi, address)
 
         wallet_analysis = self.wallet_analyzer.analyze_holders(address)

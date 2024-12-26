@@ -91,7 +91,11 @@ class EtherscanAPI:
         :return: True if the contract is verified, False otherwise.
         """
         try:
-            self.get_contract_abi(contract_address)
-            return True
+            contract_abi = self.get_contract_abi(contract_address)
+            try:
+                error = contract_abi["error"]
+                return False
+            except TypeError:
+                return True
         except ContractNotVerifiedError:
             return False

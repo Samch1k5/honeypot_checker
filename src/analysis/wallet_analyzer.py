@@ -7,11 +7,13 @@ This module analyzes wallets for total holders and suspicious holders.
 """
 
 import os
+import sys
 from collections import defaultdict
 from typing import Dict, Union
 import requests
 from dotenv import load_dotenv
 from config import logger
+from helpers.etherscan_api import EtherscanAPI
 
 
 class WalletAnalyzer:
@@ -22,6 +24,7 @@ class WalletAnalyzer:
     def __init__(self):
         load_dotenv()
         self.etherscan_api_key = os.getenv("ETHERSCAN_API_KEY")
+        self.etherscan = EtherscanAPI()
         if not self.etherscan_api_key:
             logger.fatal("Etherscan API key not found in environment variables")
 
@@ -60,13 +63,16 @@ class WalletAnalyzer:
                 "0xdAC17F958D2ee523a2206206994597C13D831ec7",  # USDT
                 "0xA0b86991C6218b36c1d19D4a2e9Eb0cE3606eb48"  # USDC
             ]
+            is_verified = self.etherscan.is_contract_verified(token_address)
 
             if is_whitelisted:
                 is_honeypot = False
             elif (
                     len(holders_data) < low_holder_threshold or
                     suspicious_ratio > suspicious_threshold or
-                    concentration_score > high_concentration_threshold
+                    concentration_score > high_concentration_threshold or
+                    not is_verified
+
             ):
                 is_honeypot = True
             else:

@@ -1,6 +1,7 @@
 .idea/
 .venv/
 __pycache__/
+src/logs/
 *.pyc
 *.pyo
 *.env

@@ -52,6 +52,17 @@ class ContractsAnalyzer:
         :return: A dictionary containing analysis results.
         """
         try:
+            if abi is None:
+                logger.warning("Can't define taxes, gas and limits because of none abi")
+                return {
+                    "buy_tax": 0,
+                    "sell_tax": 0,
+                    "transfer_tax": 0,
+                    "average_gas": 0,
+                    "buy_gas": 0,
+                    "sell_gas": 0,
+                    "limits_detected": False,
+                }
             contract = self.web3.eth.contract(
                 address=self.web3.to_checksum_address(contract_address.lower()),
                 abi=abi)
