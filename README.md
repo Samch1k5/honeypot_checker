@@ -69,11 +69,15 @@ python src/honeypot_checker.py 0xdAC17F958D2ee523a2206206994597C13D831ec7
 src/
 ├── honeypot_checker.py       # Главный скрипт анализа
 ├── utils.py                  # Утилиты (валидация адресов и др.)
+├── config.py                 # Конфиг проекта
+├── .env                      # Переменные окружения
 ├── helpers/
 │   ├── etherscan_api.py      # Работа с API Etherscan
 ├── analysis/
 │   ├── contracts_analyzer.py # Анализ смарт-контрактов
 │   ├── wallet_analyzer.py    # Анализ владельцев токенов
+│   logs/
+│   ├── honeypot_checker.log  # Логи запуска
 ```
 
 ## Основные методы

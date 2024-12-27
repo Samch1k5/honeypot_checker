@@ -10,7 +10,10 @@ infer taxes (buy, sell, transfer), and detect operational limits.
 import os
 from typing import Dict, Union
 import requests
+import secrets
 from web3 import Web3
+from web3.exceptions import ContractLogicError
+from eth_account import Account
 from dotenv import load_dotenv
 from config import logger
 
@@ -109,6 +112,20 @@ class ContractsAnalyzer:
         :param action: Type of action ('buy', 'sell', 'transfer').
         :return: Estimated tax percentage or an error message.
         """
+        try:
+            sim_result = self.simulate_buy_sell_tax(contract_address)
+            if action == "buy":
+                return sim_result["buy_tax"]
+            elif action == "sell":
+                return sim_result["sell_tax"]
+            else:
+                return sim_result["transfer_tax"]
+        except Exception as e:
+            logger.warning(
+                "Simulation approach failed for %s (action=%s). Falling back. Error: %s",
+                contract_address, action, e
+            )
+
         try:
             url = (
                 f"https://api.etherscan.io/api?module=account&"
@@ -240,3 +257,87 @@ class ContractsAnalyzer:
         except AttributeError as attr_err:
             logger.error("Attribute error detecting limits for contract: %s", attr_err)
             return False
+
+    def simulate_buy_sell_tax(self, contract_address: str) -> dict:
+        """
+        Attempts to 'simulate' a buy and sell scenario with standard ERC-20 functions:
+        - 'approve' as a pseudo-buy
+        - 'transferFrom' as a pseudo-sell
+        If the token reverts or is non-standard, we raise Exception so we can fallback
+        to Etherscan-based analysis.
+
+        :param contract_address: The ERC-20 token address.
+        :return: A dict: {"buy_tax": float, "sell_tax": float, "transfer_tax": float}
+        """
+
+        # 1) Create ephemeral wallets
+        buyer_private_key = "0x" + secrets.token_hex(32)
+        buyer_account = Account.from_key(buyer_private_key)
+
+        spender_private_key = "0x" + secrets.token_hex(32)
+        spender_account = Account.from_key(spender_private_key)
+
+        buyer_address = buyer_account.address
+        spender_address = spender_account.address
+
+        erc20_abi = [
+            {
+                "constant": True,
+                "inputs": [{"name": "_owner", "type": "address"}],
+                "name": "balanceOf",
+                "outputs": [{"name": "balance", "type": "uint256"}],
+                "type": "function",
+            },
+            {
+                "constant": False,
+                "inputs": [
+                    {"name": "_spender", "type": "address"},
+                    {"name": "_value", "type": "uint256"}
+                ],
+                "name": "approve",
+                "outputs": [{"name": "success", "type": "bool"}],
+                "type": "function",
+            },
+            {
+                "constant": False,
+                "inputs": [
+                    {"name": "_from", "type": "address"},
+                    {"name": "_to", "type": "address"},
+                    {"name": "_value", "type": "uint256"}
+                ],
+                "name": "transferFrom",
+                "outputs": [{"name": "success", "type": "bool"}],
+                "type": "function",
+            }
+        ]
+
+        contract = self.web3.eth.contract(
+            address=self.web3.to_checksum_address(contract_address),
+            abi=erc20_abi
+        )
+        test_amount = 10 * (10 ** 18)
+
+        try:
+            contract.functions.approve(spender_address, test_amount).call(
+                {"from": buyer_address}
+            )
+            buy_tax = 0.0
+
+        except ContractLogicError as err:
+            raise Exception(f"Simulation (approve) failed: {str(err)}")
+
+        try:
+            contract.functions.transferFrom(buyer_address, spender_address, test_amount).call(
+                {"from": spender_address}
+            )
+            sell_tax = 0.0
+        except ContractLogicError as err:
+            raise Exception(f"Simulation (transferFrom) failed: {str(err)}")
+
+        transfer_tax = 0.0
+
+        return {
+            "buy_tax": buy_tax,
+            "sell_tax": sell_tax,
+            "transfer_tax": transfer_tax,
+        }
