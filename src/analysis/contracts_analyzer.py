@@ -1,343 +1,277 @@
 # src/contracts_analyzer.py
 
-"""
-Contracts Analyzer Module.
-
-This module provides functionality to analyze smart contracts by fetching transaction data,
-infer taxes (buy, sell, transfer), and detect operational limits.
-"""
-
 import os
-from typing import Dict, Union
-import requests
+import time
 import secrets
+import requests
+from typing import Dict, Union
+from dotenv import load_dotenv
+from eth_account import Account
 from web3 import Web3
 from web3.exceptions import ContractLogicError
-from eth_account import Account
-from dotenv import load_dotenv
+from eth_abi import decode
+
 from config import logger
 
+# Константы
+UNISWAP_V2_ROUTER_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"  # Uniswap V2 Router (Ethereum Mainnet)
+WETH_ADDRESS = "0xC02aaa39b223FE8D0A0e5C4F27ead9083C756Cc2"         # WETH (Ethereum Mainnet)
+
+UNISWAP_V2_ROUTER_ABI = [
+    {
+        "name": "swapExactETHForTokens",
+        "type": "function",
+        "inputs": [
+            {"type": "uint256", "name": "amountOutMin"},
+            {"type": "address[]", "name": "path"},
+            {"type": "address", "name": "to"},
+            {"type": "uint256", "name": "deadline"}
+        ],
+        "outputs": [
+            {"type": "uint256[]", "name": "amounts"}
+        ],
+        "stateMutability": "payable"
+    },
+    {
+        "name": "swapExactTokensForETH",
+        "type": "function",
+        "inputs": [
+            {"type": "uint256", "name": "amountIn"},
+            {"type": "uint256", "name": "amountOutMin"},
+            {"type": "address[]", "name": "path"},
+            {"type": "address", "name": "to"},
+            {"type": "uint256", "name": "deadline"}
+        ],
+        "outputs": [
+            {"type": "uint256[]", "name": "amounts"}
+        ],
+        "stateMutability": "nonpayable"
+    }
+]
+
+# Мини-ABI для обычного ERC-20 transfer
+ERC20_ABI = [
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "_to", "type": "address"},
+            {"name": "_value", "type": "uint256"}
+        ],
+        "name": "transfer",
+        "outputs": [{"name": "success", "type": "bool"}],
+        "type": "function"
+    }
+]
 
 class ContractCannotBeAnalyzed(Exception):
-    """
-    Exception raised while analyzing contract gets an error.
-    """
-
     def __init__(self):
-        self.message = "Can't analyze contract"
-        super().__init__(self.message)
+        super().__init__("Can't analyze contract")
 
 
 class ContractsAnalyzer:
-    """
-    A class to analyze Ethereum smart contracts for taxes and operational limits.
-    """
-
     def __init__(self, web3_provider: str):
-        """
-        Initializes the ContractsAnalyzer class with a Web3 provider.
-
-        :param web3_provider: URL of the Web3 provider (e.g., Infura or Alchemy).
-        """
         self.web3 = Web3(Web3.HTTPProvider(web3_provider))
         load_dotenv()
         self.etherscan_api_key = os.getenv("ETHERSCAN_API_KEY")
         if not self.etherscan_api_key:
             logger.fatal("Etherscan API key not found in environment variables.")
 
-    def analyze_contract(self, abi: Dict, contract_address: str) -> (
-            Dict[str, Union[str, bool, float]]):
-        """
-        Analyzes a contract for taxes, gas usage, and operational limits.
-
-        :param abi: The ABI of the smart contract.
-        :param contract_address: The Ethereum address of the contract.
-        :return: A dictionary containing analysis results.
-        """
-        try:
-            limits_detected = None
-            if abi is None:
-                logger.warning("Can't define limits because of none abi")
-                limits_detected = False
-                contract = self.web3.eth.contract(
-                    address=self.web3.to_checksum_address(contract_address.lower()))
-            else:
-                contract = self.web3.eth.contract(
-                    address=self.web3.to_checksum_address(contract_address.lower()),
-                    abi=abi)
-
-            buy_tax = self.infer_tax(contract_address, action="buy")
-            logger.debug("Buy tax for %s: %s", contract_address, buy_tax)
-
-            sell_tax = self.infer_tax(contract_address, action="sell")
-            logger.debug("Sell tax for %s: %s", contract_address, sell_tax)
-
-            transfer_tax = self.infer_tax(contract_address, action="transfer")
-            logger.debug("Transfer tax for %s: %s", contract_address, transfer_tax)
-
-            gas_metrics = self.calculate_gas_metrics(contract_address)
-            logger.debug("Gas metrics for %s: %s", contract_address, gas_metrics)
-
-            if limits_detected is None:
-                limits_detected = self.detect_limits(contract)
-                logger.debug("Limits detected for %s: %s", contract_address, limits_detected)
-
-            return {
-                "buy_tax": buy_tax,
-                "sell_tax": sell_tax,
-                "transfer_tax": transfer_tax,
-                "average_gas": gas_metrics["average_gas"],
-                "buy_gas": gas_metrics["buy_gas"],
-                "sell_gas": gas_metrics["sell_gas"],
-                "limits_detected": limits_detected,
-            }
-        except requests.exceptions.RequestException as req_err:
-            logger.error("HTTP request failed for %s: %s", contract_address, req_err)
-            return {
-                "error": True,
-                "message": "HTTP request failed"
-            }
-        except KeyError as key_err:
-            logger.error("Key error while analyzing contract %s: %s", contract_address, key_err)
-            return {
-                "error": True,
-                "message": "Key error in contract analysis"
-            }
-
-    def infer_tax(self, contract_address: str, action: str) -> Union[str, float]:
-        """
-        Infer taxes (buy, sell, transfer) based on transaction data from Etherscan.
-
-        :param contract_address: Address of the token contract.
-        :param action: Type of action ('buy', 'sell', 'transfer').
-        :return: Estimated tax percentage or an error message.
-        """
-        try:
-            sim_result = self.simulate_buy_sell_tax(contract_address)
-            if action == "buy":
-                return sim_result["buy_tax"]
-            elif action == "sell":
-                return sim_result["sell_tax"]
-            else:
-                return sim_result["transfer_tax"]
-        except Exception as e:
-            logger.warning(
-                "Simulation approach failed for %s (action=%s). Falling back. Error: %s",
-                contract_address, action, e
-            )
-
-        try:
-            url = (
-                f"https://api.etherscan.io/api?module=account&"
-                f"action=tokentx&contractaddress={contract_address}"
-                f"&page=1&offset=1000&sort=desc&apikey={self.etherscan_api_key}"
-            )
-            response = requests.get(url, timeout=60)
-            if response.status_code == 200:
-                result = response.json()
-                if result["status"] == "1":
-                    transactions = result["result"]
-
-                    total_tax = 0
-                    tax_count = 0
-
-                    for tx in transactions:
-                        gas_price = int(tx["gasPrice"])
-                        gas_used = int(tx["gasUsed"])
-
-                        if int(tx["value"]) <= 0:
-                            continue
-
-                        tax_value = (gas_price * gas_used) / int(tx["value"])
-
-                        if tax_value > 1:
-                            continue
-
-                        if action == "buy" and tx["to"] != contract_address:
-                            total_tax += tax_value
-                            tax_count += 1
-                        elif action == "sell" and tx["from"] != contract_address:
-                            total_tax += tax_value
-                            tax_count += 1
-                        elif (action == "transfer" and tx["from"] != contract_address
-                              and tx["to"] != contract_address):
-                            total_tax += tax_value
-                            tax_count += 1
-
-                    if tax_count > 0:
-                        return round(total_tax / tax_count * 100, 2)
-                    return 0.0
-                logger.error("No relevant transactions found for %s",
-                             contract_address)
-                return "No relevant transactions found"
-            logger.error("HTTP error for tax inference: %s",
-                         response.status_code)
-            return f"HTTP error: {response.status_code}"
-        except requests.exceptions.RequestException:
-            logger.error("HTTP request failed for tax inference for %s",
-                         contract_address)
-            return "HTTP request failed"
-
-    def calculate_gas_metrics(self, contract_address: str) -> Dict[str, float]:
-        """
-        Calculate gas metrics for buy and sell transactions.
-
-        :param contract_address: Address of the token contract.
-        :return: A dictionary containing total buy/sell gas and average gas usage.
-        """
-        try:
-            total_gas = 0
-            total_buy_gas = 0
-            total_sell_gas = 0
-            gas_count = 0
-
-            for page in range(1, 4):
-                url = (
-                    f"https://api.etherscan.io/api?module=account&"
-                    f"action=tokentx&contractaddress={contract_address}"
-                    f"&page={page}&offset=1000&sort=desc&apikey={self.etherscan_api_key}"
-                )
-                response = requests.get(url, timeout=60)
-                if response.status_code != 200:
-                    logger.error("HTTP error fetching gas metrics for %s: %s",
-                                 contract_address, response.status_code)
-                    break
-
-                result = response.json()
-                if result["status"] != "1":
-                    logger.error("API error fetching gas metrics for %s: %s",
-                                 contract_address, result.get("message", "Unknown error"))
-                    break
-
-                for tx in result["result"]:
-                    if int(tx["value"]) <= 0:
-                        continue
-
-                    gas_used = int(tx["gasUsed"])
-                    total_gas += gas_used
-                    gas_count += 1
-
-                    if (tx.get("contractAddress", "").lower() ==
-                            contract_address.lower() and tx["from"]):
-                        total_buy_gas += gas_used
-
-                    if (tx.get("contractAddress", "").lower() ==
-                            contract_address.lower() and tx["to"]):
-                        total_sell_gas += gas_used
-
-            average_gas = total_gas / gas_count if gas_count > 0 else 0
-            logger.debug("Calculated Gas Metrics for %s:"
-                         " {'average_gas': %s, 'buy_gas': %s, 'sell_gas': %s}",
-                         contract_address, average_gas, total_buy_gas, total_sell_gas)
-            return {
-                "average_gas": average_gas,
-                "buy_gas": total_buy_gas,
-                "sell_gas": total_sell_gas,
-            }
-        except requests.exceptions.RequestException as req_err:
-            logger.error("HTTP request failed for gas metrics for %s: %s",
-                         contract_address, req_err)
-            return {
-                "error": True,
-                "message": "HTTP request failed"
-            }
-
-    def detect_limits(self, contract: Web3().eth.contract) -> bool:
-        """
-        Detect operational limits by calling contract methods or analyzing behavior.
-
-        :param contract: The smart contract instance.
-        :return: True if limits are detected, False otherwise.
-        """
-        try:
-            if hasattr(contract.functions, 'maxTxAmount'):
-                max_tx_amount = contract.functions.maxTxAmount().call()
-                return max_tx_amount < self.web3.to_wei(1, 'ether')
-            return False
-        except AttributeError as attr_err:
-            logger.error("Attribute error detecting limits for contract: %s", attr_err)
-            return False
-
-    def simulate_buy_sell_tax(self, contract_address: str) -> dict:
-        """
-        Attempts to 'simulate' a buy and sell scenario with standard ERC-20 functions:
-        - 'approve' as a pseudo-buy
-        - 'transferFrom' as a pseudo-sell
-        If the token reverts or is non-standard, we raise Exception so we can fallback
-        to Etherscan-based analysis.
-
-        :param contract_address: The ERC-20 token address.
-        :return: A dict: {"buy_tax": float, "sell_tax": float, "transfer_tax": float}
-        """
-
-        # 1) Create ephemeral wallets
-        buyer_private_key = "0x" + secrets.token_hex(32)
-        buyer_account = Account.from_key(buyer_private_key)
-
-        spender_private_key = "0x" + secrets.token_hex(32)
-        spender_account = Account.from_key(spender_private_key)
-
-        buyer_address = buyer_account.address
-        spender_address = spender_account.address
-
-        erc20_abi = [
-            {
-                "constant": True,
-                "inputs": [{"name": "_owner", "type": "address"}],
-                "name": "balanceOf",
-                "outputs": [{"name": "balance", "type": "uint256"}],
-                "type": "function",
-            },
-            {
-                "constant": False,
-                "inputs": [
-                    {"name": "_spender", "type": "address"},
-                    {"name": "_value", "type": "uint256"}
-                ],
-                "name": "approve",
-                "outputs": [{"name": "success", "type": "bool"}],
-                "type": "function",
-            },
-            {
-                "constant": False,
-                "inputs": [
-                    {"name": "_from", "type": "address"},
-                    {"name": "_to", "type": "address"},
-                    {"name": "_value", "type": "uint256"}
-                ],
-                "name": "transferFrom",
-                "outputs": [{"name": "success", "type": "bool"}],
-                "type": "function",
-            }
-        ]
-
-        contract = self.web3.eth.contract(
-            address=self.web3.to_checksum_address(contract_address),
-            abi=erc20_abi
+        # Инициализируем Uniswap V2 Router
+        self.uniswap_router = self.web3.eth.contract(
+            address=self.web3.to_checksum_address(UNISWAP_V2_ROUTER_ADDRESS),
+            abi=UNISWAP_V2_ROUTER_ABI
         )
-        test_amount = 10 * (10 ** 18)
 
-        try:
-            contract.functions.approve(spender_address, test_amount).call(
-                {"from": buyer_address}
-            )
-            buy_tax = 0.0
-
-        except ContractLogicError as err:
-            raise Exception(f"Simulation (approve) failed: {str(err)}")
-
-        try:
-            contract.functions.transferFrom(buyer_address, spender_address, test_amount).call(
-                {"from": spender_address}
-            )
-            sell_tax = 0.0
-        except ContractLogicError as err:
-            raise Exception(f"Simulation (transferFrom) failed: {str(err)}")
-
-        transfer_tax = 0.0
+    def analyze_contract(self, abi: Dict, contract_address: str) -> Dict[str, Union[str, bool, float]]:
+        """
+        Пример "анализатора": возвращаем гипотетический buy_tax, sell_tax, transfer_tax.
+        Условно делаем через self.infer_tax(...).
+        """
+        buy_tax = self.infer_tax(contract_address, "buy")
+        sell_tax = self.infer_tax(contract_address, "sell")
+        transfer_tax = self.infer_tax(contract_address, "transfer")
 
         return {
             "buy_tax": buy_tax,
             "sell_tax": sell_tax,
-            "transfer_tax": transfer_tax,
+            "transfer_tax": transfer_tax
         }
+
+    def infer_tax(self, contract_address: str, action: str) -> Union[str, float]:
+        """
+        Пробуем "симулировать" налог для: buy, sell, transfer.
+        """
+
+        if action == "buy":
+            tokens_got = self.simulate_uniswap_buy(contract_address, self.web3.to_wei(0.01, 'ether'))
+            return tokens_got
+
+        elif action == "sell":
+            eth_got = self.simulate_uniswap_sell(contract_address, 10 * (10 ** 18))
+            return eth_got
+
+        elif action == "transfer":
+            success = self.simulate_basic_transfer(contract_address, 10 * (10 ** 18))
+            return 0.0 if success else "transfer revert"
+
+        return 0.0
+
+    def simulate_uniswap_buy(self, token_address: str, eth_amount_wei: int) -> float:
+        """
+        «Симулируем» покупку токена через swapExactETHForTokens на Uniswap V2 Router (eth_call).
+        Возвращаем количество купленных токенов (uint256) в float.
+        """
+        buyer_priv_key = "0x" + secrets.token_hex(32)
+        buyer_account = Account.from_key(buyer_priv_key)
+        buyer_address = buyer_account.address
+
+        path = [
+            self.web3.to_checksum_address(WETH_ADDRESS),
+            self.web3.to_checksum_address(token_address)
+        ]
+        deadline = int(time.time()) + 300
+
+        built_tx = self.uniswap_router.functions.swapExactETHForTokens(
+            0,
+            path,
+            buyer_address,
+            deadline
+        ).buildTransaction({
+            "from": buyer_address,
+            "value": eth_amount_wei,
+        })
+
+        call_tx = {
+            "to": UNISWAP_V2_ROUTER_ADDRESS,
+            "from": buyer_address,
+            "data": built_tx["data"],
+            "value": eth_amount_wei,
+            "gas": 500000,
+            "gasPrice": 0
+        }
+
+        try:
+            result = self.web3.eth.call(call_tx)
+            return_values = decode(["uint256[]"], result)
+            amounts_list = return_values[0]
+            if len(amounts_list) < 2:
+                return 0.0
+            return float(amounts_list[-1])
+        except ContractLogicError as e:
+            logger.warning("Swap simulation revert (buy): %s", e)
+            return 0.0
+        except Exception as e:
+            logger.warning("Swap simulation error (buy): %s", e)
+            return 0.0
+
+    def simulate_uniswap_sell(self, token_address: str, token_amount_wei: int) -> float:
+        """
+        «Симулируем» продажу токена через swapExactTokensForETH (eth_call).
+        Возвращаем, сколько ETH получится. Аналогично - нужно 'approve' на Router.
+        """
+        seller_priv_key = "0x" + secrets.token_hex(32)
+        seller_account = Account.from_key(seller_priv_key)
+        seller_address = seller_account.address
+
+        token_contract = self.web3.eth.contract(
+            address=self.web3.to_checksum_address(token_address),
+            abi=ERC20_ABI
+        )
+
+        try:
+            approve_tx = token_contract.functions.transfer(
+                self.web3.to_checksum_address(seller_address),
+                0
+            ).buildTransaction({"from": seller_address})
+            call_tx_approve = {
+                "to": token_address,
+                "from": seller_address,
+                "data": approve_tx["data"],
+                "value": 0,
+                "gas": 300000,
+                "gasPrice": 0
+            }
+            self.web3.eth.call(call_tx_approve)
+        except ContractLogicError as e:
+            logger.warning("Approve simulation revert (sell): %s", e)
+            return 0.0
+        except Exception as e:
+            logger.warning("Approve simulation error (sell): %s", e)
+            return 0.0
+
+        path = [
+            self.web3.to_checksum_address(token_address),
+            self.web3.to_checksum_address(WETH_ADDRESS)
+        ]
+        deadline = int(time.time()) + 300
+
+        built_tx = self.uniswap_router.functions.swapExactTokensForETH(
+            token_amount_wei,
+            0,
+            path,
+            seller_address,
+            deadline
+        ).buildTransaction({
+            "from": seller_address
+        })
+
+        call_tx_swap = {
+            "to": UNISWAP_V2_ROUTER_ADDRESS,
+            "from": seller_address,
+            "data": built_tx["data"],
+            "value": 0,
+            "gas": 700000,
+            "gasPrice": 0
+        }
+
+        try:
+            result = self.web3.eth.call(call_tx_swap)
+            return_values = decode(["uint256[]"], result)
+            amounts_list = return_values[0]
+            if len(amounts_list) < 2:
+                return 0.0
+            eth_out = amounts_list[-1]
+            return float(eth_out)
+        except ContractLogicError as e:
+            logger.warning("Swap simulation revert (sell): %s", e)
+            return 0.0
+        except Exception as e:
+            logger.warning("Swap simulation error (sell): %s", e)
+            return 0.0
+
+    def simulate_basic_transfer(self, token_address: str, token_amount_wei: int) -> bool:
+        """
+        Псевдо-симуляция обычного transfer(...) у стандартного ERC-20.
+        Возвращаем True, если не было revert, иначе False.
+        """
+        priv_key = "0x" + secrets.token_hex(32)
+        acc = Account.from_key(priv_key)
+        from_address = acc.address
+
+        token_contract = self.web3.eth.contract(
+            address=self.web3.to_checksum_address(token_address),
+            abi=ERC20_ABI
+        )
+
+        built_tx = token_contract.functions.transfer(
+            self.web3.to_checksum_address("0x1111111111111111111111111111111111111111"),
+            token_amount_wei
+        ).buildTransaction({"from": from_address})
+
+        call_tx = {
+            "to": token_address,
+            "from": from_address,
+            "data": built_tx["data"],
+            "value": 0,
+            "gas": 300000,
+            "gasPrice": 0
+        }
+        try:
+            self.web3.eth.call(call_tx)
+            return True
+        except ContractLogicError as e:
+            logger.warning("Transfer revert: %s", e)
+            return False
+        except Exception as e:
+            logger.warning("Transfer error: %s", e)
+            return False
